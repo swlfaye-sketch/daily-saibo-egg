@@ -37,9 +37,9 @@ from datetime import datetime
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+# 默认启用证书校验。原先为兼容个别镜像站关闭过校验，被平台安全扫描判为中危
+# （数据外泄，指向本行）；实测全部目标站点证书链正常，故恢复 Python 默认的严格校验。
 CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
 
 # ---------- 监控目标 ----------
 # kind: price（定价页：只取价格与档位）| names（表格型：只取第一列名称集合）

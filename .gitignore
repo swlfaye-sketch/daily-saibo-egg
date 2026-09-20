@@ -28,3 +28,5 @@ desktop.ini
 *.pem
 *.key
 credentials.json
+push_config.json
+push_config.*.json

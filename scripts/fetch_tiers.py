@@ -19,13 +19,23 @@ from datetime import datetime
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+# 默认启用证书校验。原先为兼容个别镜像站关闭过校验，被平台安全扫描判为中危
+# （数据外泄，指向本行）；实测全部目标站点证书链正常，故恢复 Python 默认的严格校验。
 CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
 
 REPO = "mnfst/awesome-free-llm-apis"
 RAW = f"https://raw.githubusercontent.com/{REPO}/main/README.md"
 API_REPO = f"https://api.github.com/repos/{REPO}"
+
+# GitHub raw 加速镜像：直连失败时依次轮换，防单点失效。
+# 实测（2026-09-20）：raw.githubusercontent.com 连续 3 次 RemoteDisconnected，
+# 而同一时刻 api.github.com 2/2 HTTP 200——是 raw 域名波动，不是仓库失效。
+# 甲路核心信源不能单点依赖一个域名，故必须带镜像回退。
+GH_MIRRORS = [
+    "https://ghproxy.net/",
+    "https://gh-proxy.com/",
+    "https://gh.xxooo.cf/",
+]
 
 
 def fetch(url, hdr=None, timeout=30):
@@ -43,6 +53,27 @@ def fetch(url, hdr=None, timeout=30):
 
 
 # ---------- 一、汇总仓库 ----------
+def fetch_readme():
+    """取汇总仓库 README：直连优先，失败则依次轮换加速镜像与 jsDelivr。
+
+    返回 (raw_bytes 或 None, 实际取回的域名 或 None, 尝试记录列表)。
+    取回内容须大于 5 KB 才算成功——该 README 实测约 28 KB，
+    过小说明拿到的是错误页或拦截页，不能当作有效数据。
+    """
+    path = f"{REPO}/main/README.md"
+    urls = ["https://raw.githubusercontent.com/" + path]
+    urls += [m + "https://raw.githubusercontent.com/" + path for m in GH_MIRRORS]
+    urls.append("https://cdn.jsdelivr.net/gh/" + path)
+    tried = []
+    for u in urls:
+        st, raw = fetch(u, timeout=45)
+        host = u.split("/")[2]
+        tried.append(f"{host}={st}")
+        if st == 200 and len(raw) > 5000:
+            return raw, host, tried
+    return None, None, tried
+
+
 def parse_repo(text):
     """解析 README：按 ## 分大节，按 ### 分供应商。"""
     lines = text.splitlines()
@@ -115,9 +146,9 @@ def main():
 
     result = {"date": today, "sources": {}}
 
-    # 仓库
-    st, raw = fetch(RAW)
-    if st == 200:
+    # 仓库（直连优先，失败自动轮换镜像）
+    raw, via, tried = fetch_readme()
+    if raw is not None:
         text = raw.decode("utf-8", "replace")
         secs = parse_repo(text)
         st2, raw2 = fetch(API_REPO)
@@ -125,10 +156,11 @@ def main():
         if st2 == 200:
             j = json.loads(raw2.decode())
             meta = {"stars": j.get("stargazers_count"), "pushed_at": j.get("pushed_at")}
-        result["sources"]["repo"] = {"ok": True, "repo": REPO, "meta": meta,
+        result["sources"]["repo"] = {"ok": True, "repo": REPO, "via": via,
+                                     "tried": tried, "meta": meta,
                                      "sections": secs}
     else:
-        result["sources"]["repo"] = {"ok": False, "status": st, "repo": REPO}
+        result["sources"]["repo"] = {"ok": False, "repo": REPO, "tried": tried}
 
     # OpenRouter
     result["sources"]["openrouter"] = openrouter_free()
@@ -143,7 +175,7 @@ def main():
     r = result["sources"]["repo"]
     if r.get("ok"):
         m = r.get("meta", {})
-        md.append(f"信源：`{REPO}`｜星数 {m.get('stars')}｜仓库最后推送 {m.get('pushed_at')}")
+        md.append(f"信源：`{REPO}`｜经 {r.get('via')} 取回｜星数 {m.get('stars')}｜仓库最后推送 {m.get('pushed_at')}")
         md.append(f"抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
         total = sum(len(s["providers"]) for s in r["sections"])
         md.append(f"供应商数：{total}")
@@ -166,7 +198,8 @@ def main():
                                   f"| {mm['modality']} | {mm['rate_limit']} |")
                 md.append("")
     else:
-        md.append(f"⚠️ 仓库抓取失败：HTTP {r.get('status')}")
+        md.append("⚠️ 仓库抓取失败：直连与全部镜像均未取回（"
+                  + "、".join(r.get("tried") or []) + "）")
 
     o = result["sources"]["openrouter"]
     md.append("## OpenRouter 实时零价模型")
@@ -192,9 +225,10 @@ def main():
     if r.get("ok"):
         provs = sum(len(s["providers"]) for s in r["sections"])
         models = sum(len(p["models"]) for s in r["sections"] for p in s["providers"])
-        print(f" | 大节 {len(r['sections'])} | 供应商 {provs} | 模型条目 {models}")
+        print(f" | 经 {r.get('via')} 取回 | 大节 {len(r['sections'])}"
+              f" | 供应商 {provs} | 模型条目 {models}")
     else:
-        print()
+        print(f" | 尝试：{'、'.join(r.get('tried') or [])}")
     print(f"[OpenRouter] {'OK' if o.get('ok') else '失败'}", end="")
     if o.get("ok"):
         print(f" | 总数 {o['total_models']} | 免费 {len(o['models'])}")
