@@ -112,7 +112,14 @@ ERR_HINT = {
 }
 
 CONFIG_SAMPLE = {
-    "_说明": "把 enabled 改为 true 的通道才会被推送。凭据只填本机文件，勿提交到版本库。",
+    "_说明": [
+        "只有把 enabled 改为 true 的通道才会推送；一个都不改，本脚本不参与主流程。",
+        "数据流向：推送会把清单正文发往所填通道的第三方服务端"
+        "（钉钉／飞书／企业微信／Server酱／PushPlus／Bark／ntfy／你填的邮件服务商）。"
+        "清单里若有你不希望外发的内容，请先删节，或干脆不启用推送、只保留本地文件。",
+        "凭据以明文存放在本文件里。只填本机文件，勿提交到版本库"
+        "（`.gitignore` 已含 push_config.json）。",
+    ],
     "dingtalk": {
         "enabled": False,
         "access_token": "",
@@ -410,7 +417,9 @@ def cmd_init(path):
         f.write(json.dumps(CONFIG_SAMPLE, ensure_ascii=False, indent=2))
     out("已生成配置样例：%s" % path)
     out("把要用的通道 enabled 改为 true 并填好凭据，再跑 --probe 自检。")
-    out("提醒：该文件含凭据，勿提交到公开仓库（`.gitignore` 已含 push_config.json）。")
+    out("提醒一：该文件含凭据，勿提交到公开仓库（`.gitignore` 已含 push_config.json）。")
+    out("提醒二：启用任一通道后，清单正文会发往该通道的第三方服务端，"
+        "并留在对方的服务器上；清单里若有不宜外发的内容，请先删节，或不启用推送。")
     return 0
 
 

@@ -106,10 +106,155 @@ TARGETS = [
     {"name": "GitHub Blog RSS", "kind": "rss", "url": "https://github.blog/feed/"},
     {"name": "Cloudflare Blog RSS", "kind": "rss", "url": "https://blog.cloudflare.com/rss/"},
 
+    # --- 视频与生图平台（2026-09-20 逐站实测后新增） ---
+    # 背景：评测者两次提到视频／生图类覆盖偏少，故对着 16 个站点做了一轮实测
+    # （先判「能不能抓到可结构化比对的信号」，再判「这个信号自身稳不稳定」）。
+    # 结论：**这类平台的官网绝大多数做不成指纹目标**——
+    #   · 即梦／可灵中国站／通义万相／腾讯混元／智谱清言：SPA 壳页，正文 4–83 字，服务端不吐内容；
+    #   · 即梦／可灵／海螺：正文 400–1100 字且连抓 3 次零波动，但既无价格也无档位名，
+    #     拿来只能做整页指纹（改版才响），对「额度变化」没有意义，**故不收录**；
+    #   · Runway 返 308、Midjourney 返 403，Pika／Luma／Krea 走代理 502、可图超时，均不可达。
+    # 下面两站是实测下来唯二可用的：连抓 3 次正文字数与档位／价格集合**完全一致**（波动 0%）。
+    {"name": "MiniMax 开放平台", "kind": "price", "url": "https://platform.minimaxi.com/"},
+    {"name": "Flux 官方定价", "kind": "price", "url": "https://blackforestlabs.ai/"},
+
     # --- 官方仓库发版 ---
     {"name": "ollama 发版", "kind": "gh", "url": "https://api.github.com/repos/ollama/ollama/releases?per_page=1"},
     {"name": "mnfst 汇总仓库", "kind": "gh", "url": "https://api.github.com/repos/mnfst/awesome-free-llm-apis"},
 ]
+
+
+# ---------- 用户自定义目标（可选，不改内置清单） ----------
+# 设计取舍：内置 TARGETS 里承载了大量实测注释（某站为何移出、某页为何要放宽超时），
+# 而 JSON 不支持注释——**故不把内置清单外置**，改为「叠加」：用户在数据目录放一份
+# targets_user.json，脚本运行时合并。这样既保住注释里的经验，又能自行增删目标。
+USER_FILE = "targets_user.json"
+
+KINDS = ("price", "names", "page", "rss", "gh", "json")
+
+
+def parse_user_file(path):
+    """解析一份用户目标文件，返回 (add 列表, disable 集合, 说明列表, 错误列表)。"""
+    notes, errs = [], []
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        errs.append("用户目标文件解析失败（%s）：%s" % (type(e).__name__, e))
+        return [], set(), [], errs
+
+    if not isinstance(raw, dict):
+        errs.append("用户目标文件顶层须为对象（含 add／disable 两个键）")
+        return [], set(), [], errs
+
+    add = []
+    for i, t in enumerate(raw.get("add") or [], 1):
+        if not isinstance(t, dict):
+            errs.append("add 第 %d 项不是对象，已跳过" % i)
+            continue
+        missing = [k for k in ("name", "kind", "url") if not t.get(k)]
+        if missing:
+            errs.append("add 第 %d 项缺字段 %s，已跳过" % (i, "／".join(missing)))
+            continue
+        if t["kind"] not in KINDS:
+            errs.append("add 第 %d 项 kind=%s 不在支持范围（%s），已跳过"
+                        % (i, t["kind"], "／".join(KINDS)))
+            continue
+        rec = {"name": t["name"], "kind": t["kind"], "url": t["url"]}
+        if t.get("timeout"):
+            try:
+                rec["timeout"] = int(t["timeout"])
+            except Exception:
+                errs.append("add 第 %d 项 timeout 不是整数，已忽略该字段" % i)
+        add.append(rec)
+
+    dis = raw.get("disable") or []
+    if not isinstance(dis, list):
+        errs.append("disable 须为数组，已忽略")
+        dis = []
+
+    return add, set(str(x) for x in dis), notes, errs
+
+
+def merge_targets(base=None, explicit=None):
+    """内置清单与用户清单合并，返回 (最终清单, 说明列表, 错误列表)。
+
+    用户文件位置：显式 `--targets` 指定的路径优先，否则取 `<数据目录>/targets_user.json`。
+    两份都存在时**只认显式指定的那份**，避免来源混淆。
+    """
+    path = explicit or (os.path.join(base, USER_FILE) if base else "")
+    if not path or not os.path.exists(path):
+        if explicit:
+            return list(TARGETS), [], ["--targets 指定的文件不存在：%s" % explicit]
+        return list(TARGETS), [], []
+
+    add, dis, notes, errs = parse_user_file(path)
+    if errs and not add and not dis:
+        # 文件存在但完全读不出内容：不静默退回，让使用者看到问题
+        return list(TARGETS), notes, errs
+
+    final = []
+    for t in TARGETS:
+        if t["name"] in dis or t["url"] in dis:
+            notes.append("已停用内置目标：%s" % t["name"])
+            continue
+        final.append(t)
+
+    builtin_urls = {t["url"] for t in TARGETS}
+    seen = set(builtin_urls)
+    for t in add:
+        if t["url"] in builtin_urls:
+            notes.append("「%s」网址与内置目标重复，已并入内置项" % t["name"])
+            continue
+        if t["url"] in seen:
+            notes.append("「%s」网址在用户清单内重复，已跳过" % t["name"])
+            continue
+        seen.add(t["url"])
+        final.append(t)
+        notes.append("新增目标：%s（%s）" % (t["name"], t["kind"]))
+
+    return final, notes, errs
+
+
+USER_SAMPLE = """{
+  "_说明": [
+    "本文件用来在你自己的环境里增删监控目标，不会修改技能内置清单，升级技能时也不会被覆盖。",
+    "两个键都可省略。改完直接跑 watch_changes.py，脚本会自动读取本目录下的同名文件。",
+    "add 里每一项须含 name、kind、url 三个字段；kind 只支持这六种：",
+    "  price  定价页，只盯价格数字与档位名（抗 A/B 测试的文案差异，定价页首选）",
+    "  names  表格型页面，只取第一列名称集合（如模型上架清单）",
+    "  page   整页正文指纹（适合官网首页、公告页这类整体改版才变的）",
+    "  rss    订阅源，比对新增条目",
+    "  gh     GitHub 仓库最新发版",
+    "  json   接口返回的条目",
+    "timeout 可选，单位秒，默认 45。大页面（超过 1 MB）建议放宽到 75。",
+    "disable 里写内置目标的名称或网址都行，两者都能匹配。",
+    "收录原则：只放低频变化的目标。媒体流与热门榜天天都变，放进哨兵会天天报警、淹没真信号。"
+  ],
+  "add": [
+  ],
+  "disable": [
+  ]
+}
+"""
+
+
+def cmd_init_user(base):
+    """在数据目录生成 targets_user.json 样例。"""
+    path = os.path.join(base, USER_FILE)
+    if os.path.exists(path):
+        print("用户目标文件已存在，未覆盖：%s" % path)
+        return 1
+    try:
+        os.makedirs(base, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(USER_SAMPLE)
+    except Exception as e:
+        print("❌ 写入失败（%s）：%s" % (type(e).__name__, e))
+        return 1
+    print("✅ 已生成样例：%s" % path)
+    print("   把要加的目标填进 add，要停用的内置目标名填进 disable，保存后直接跑即可。")
+    return 0
 
 
 def fetch(url, timeout=45, retries=3):
@@ -283,10 +428,44 @@ def snapshot_for(t):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python watch_changes.py <数据目录> [--init]")
+        print("用法: python watch_changes.py <数据目录> [--init] [--targets <文件>] "
+              "[--init-user] [--list-targets]")
         sys.exit(1)
     base = sys.argv[1]
     init_only = "--init" in sys.argv
+
+    # 生成用户目标样例文件（不抓取，纯写盘）
+    if "--init-user" in sys.argv:
+        sys.exit(cmd_init_user(base))
+
+    explicit = ""
+    if "--targets" in sys.argv:
+        i = sys.argv.index("--targets")
+        if i + 1 >= len(sys.argv):
+            print("❌ --targets 后面要跟文件路径")
+            sys.exit(1)
+        explicit = sys.argv[i + 1]
+
+    targets, tnote, terr = merge_targets(base, explicit or None)
+    if terr:
+        for e in terr:
+            print("⚠️  {} ".format(e))
+    if tnote:
+        print("目标清单调整：")
+        for n in tnote:
+            print("   · %s" % n)
+    if not targets:
+        print("❌ 合并后目标清单为空，请检查 disable 是否写多了")
+        sys.exit(1)
+
+    # 只列出合并后的清单，不抓取——用来确认自定义配置是否已生效
+    if "--list-targets" in sys.argv:
+        print("合并后共 %d 个监控目标（内置 %d 个）："
+              % (len(targets), len(TARGETS)))
+        for i, t in enumerate(targets, 1):
+            print("  %2d. %-26s %-6s %s" % (i, t["name"], t["kind"], t["url"]))
+        return 0
+
     snapdir = os.path.join(base, "snapshots")
     outdir = os.path.join(base, "out")
     os.makedirs(snapdir, exist_ok=True)
@@ -306,7 +485,7 @@ def main():
         except Exception:
             ftab = {}
 
-    for t in TARGETS:
+    for t in targets:
         k = key_of(t["url"])
         path = os.path.join(snapdir, f"{k}.json")
         try:
@@ -373,11 +552,22 @@ def main():
 
     # 报告
     lines = [f"# 官方渠道变更报告 · {today}", "",
-             f"监控目标 {len(TARGETS)} 个｜有变化 {len(changes)} 个｜"
+             f"监控目标 {len(targets)} 个｜有变化 {len(changes)} 个｜"
              f"无变化 {len(unchanged)} 个｜判为抖动 {len(jitter)} 个｜"
              f"建基线 {len(baseline)} 个｜失败 {len(failed)} 个", ""]
+    if tnote:
+        lines += ["**本期目标清单调整**：" + "；".join(tnote), ""]
+
+    # 章节编号动态生成：没有内容的章节不输出，编号一并顺延。
+    # 早先写死「一、二、三、四、五」，空章节不输出时就会出现「一、三、五」的跳号。
+    _sec = [0]
+
+    def sec(title):
+        _sec[0] += 1
+        return "## %s、%s" % ("一二三四五六七八九十"[_sec[0] - 1], title)
+
     if changes:
-        lines += ["## 一、有变化（需人工确认）", ""]
+        lines += [sec("有变化（需人工确认）"), ""]
         for c in changes:
             lines.append(f"- **{c['name']}**（{c['kind']}）")
             lines.append(f"  - 变化：{c['before']} → {c['after']}")
@@ -389,9 +579,9 @@ def main():
                      "须打开页面确认后再写入清单。")
         lines.append("")
     else:
-        lines += ["## 一、有变化", "", "本期无变化。", ""]
+        lines += [sec("有变化"), "", "本期无变化。", ""]
     if jitter:
-        lines += ["## 二、判为抖动（指纹变了但内容相似，不计入变化）", ""]
+        lines += [sec("判为抖动（指纹变了但内容相似，不计入变化）"), ""]
         lines += [f"- {n}" for n in jitter]
         lines.append("")
         lines.append("> 这类页面含轮播或随机推荐元素，正文长度会在两次抓取间来回跳动。"
@@ -399,12 +589,12 @@ def main():
                      "若某目标连续多日出现在此处，说明该站改版较大，应考虑另设指纹方式。")
         lines.append("")
     if baseline:
-        lines += ["## 三、首次建立基线（下期起可比对）", ""]
+        lines += [sec("首次建立基线（下期起可比对）"), ""]
         lines += [f"- {n}" for n in baseline] + [""]
     if failed:
         dead = [f for f in failed if f[3] >= 3]
         if dead:
-            lines += ["## 四、疑似失效（连续 3 次以上抓不到）", ""]
+            lines += [sec("疑似失效（连续 3 次以上抓不到）"), ""]
             lines += [f"- **{n}**｜连续失败 {s} 次｜末次成功 {ftab.get(n, {}).get('last_ok', '—')}｜{note}"
                       for n, _st, note, s in dead]
             lines.append("")
@@ -413,7 +603,7 @@ def main():
             lines.append("")
         others = [f for f in failed if f[3] < 3]
         if others:
-            lines += ["## 五、本次抓取失败（单次失败，快照保留上次值，不影响下期比对）", ""]
+            lines += [sec("本次抓取失败（单次失败，快照保留上次值，不影响下期比对）"), ""]
             lines += [f"- {n}｜连续 {s} 次｜{note}" for n, _st, note, s in others]
             lines.append("")
             lines.append("> 单次失败不等于目标失效（已内置 3 次重试）。"
@@ -428,7 +618,7 @@ def main():
     with open(rp, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    print(f"监控 {len(TARGETS)} 个｜变化 {len(changes)}｜无变化 {len(unchanged)}｜"
+    print(f"监控 {len(targets)} 个｜变化 {len(changes)}｜无变化 {len(unchanged)}｜"
           f"抖动 {len(jitter)}｜基线 {len(baseline)}｜失败 {len(failed)}")
     print(f"✅ 报告：{rp}")
     for c in changes:
